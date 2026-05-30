@@ -216,6 +216,27 @@ typedef struct {
 } block_nvfp4;
 static_assert(sizeof(block_nvfp4) == sizeof(uint8_t)*(QK_NVFP4/QK_NVFP4_SUB) + QK_NVFP4/2, "wrong nvfp4 block size/padding");
 
+// TurboQuant block (KV-cache only). Block size is fixed at head_dim = 128 — the FWHT
+// rotation is only meaningful at a power-of-two coordinate count, and matching head_dim
+// removes a stride/mismatch class. Norm is FP16 to keep KV memory dense; FP32 norms
+// outside the block were tried in the reference fork and add a second stride that
+// hurts cache locality without measurable quality gain.
+#define QK_TURBO 128
+
+// 3-bit: 128 × 3 = 384 bits = 48 bytes per block, plus FP16 norm.
+typedef struct {
+    ggml_half norm;             // L2 norm of the (FWHT-rotated) source block
+    uint8_t   qs[QK_TURBO*3/8]; // packed 3-bit codebook indices, little-endian within byte stream
+} block_turbo3;
+static_assert(sizeof(block_turbo3) == sizeof(ggml_half) + QK_TURBO*3/8, "wrong turbo3 block size/padding");
+
+// 2-bit: 128 × 2 = 256 bits = 32 bytes per block, plus FP16 norm.
+typedef struct {
+    ggml_half norm;
+    uint8_t   qs[QK_TURBO*2/8]; // packed 2-bit codebook indices
+} block_turbo2;
+static_assert(sizeof(block_turbo2) == sizeof(ggml_half) + QK_TURBO*2/8, "wrong turbo2 block size/padding");
+
 #define QK5_0 32
 typedef struct {
     ggml_half d;           // delta

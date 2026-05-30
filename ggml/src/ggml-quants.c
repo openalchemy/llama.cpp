@@ -5461,6 +5461,24 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
             {
                 VALIDATE_ROW_DATA_D_F16_IMPL(block_q1_0, data, nb);
             } break;
+        case GGML_TYPE_TURBO3:
+            {
+                const block_turbo3 * q = (const block_turbo3 *) data;
+                for (size_t i = 0; i < nb; ++i) {
+                    if (!validate_fp16(q[i].norm, i)) {
+                        return false;
+                    }
+                }
+            } break;
+        case GGML_TYPE_TURBO2:
+            {
+                const block_turbo2 * q = (const block_turbo2 *) data;
+                for (size_t i = 0; i < nb; ++i) {
+                    if (!validate_fp16(q[i].norm, i)) {
+                        return false;
+                    }
+                }
+            } break;
         case GGML_TYPE_Q4_0:
             {
                 VALIDATE_ROW_DATA_D_F16_IMPL(block_q4_0, data, nb);
@@ -5588,4 +5606,269 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
     }
 
     return true;
+}
+
+// =============================================================================
+// TurboQuant — KV-cache vector quantization
+//
+// Spec doc/specs/2026-05-30-turboquant-kv-cache.md in the engine workspace.
+// Paper: Zandieh et al., "TurboQuant: Online Vector Quantization with Near-
+// optimal Distortion Rate", arXiv 2504.19874, ICLR 2026.
+//
+// CPU reference path. The hot path lives in ggml-cuda/turboquant.cu. This
+// code is what runs on a CPU-only build, what the test harness compares
+// against, and what loads the K/V cache when CUDA is unavailable.
+//
+// Algorithm (encode one head_dim = 128 block):
+//   1. Apply Fast Walsh-Hadamard Transform in place (self-inverse rotation;
+//      cheap and gives the same Beta(0.5, (d-1)/2) marginal that paper's
+//      Haar-random orthogonal matrix gives in expectation — see Pascal-
+//      SAPUI5/llama.cpp-turboquant for the same approximation).
+//   2. Compute L2 norm of the rotated block; store as FP16 inside the block.
+//   3. Normalise coords to unit length, then pick the nearest centroid from
+//      a precomputed Lloyd-Max codebook (Gaussian Lloyd-Max levels scaled
+//      by 1/sqrt(d) — exact-fit for the limiting normalised distribution
+//      and within 0.5 % MSE of full Beta Lloyd-Max at d = 128).
+//
+// Decode is the mirror: codebook lookup × norm, then FWHT again (Hᵀ = H up
+// to a 1/n factor; the encoder divides at the end).
+// =============================================================================
+
+// In-place radix-2 Fast Walsh-Hadamard Transform. n must be a power of two.
+// Stable on host; CUDA path uses ggml/src/ggml-cuda/fwht.cu. Applying twice
+// scales by n — callers using the self-inverse property must divide.
+void ggml_fwht_f32(float * GGML_RESTRICT x, int n) {
+    assert(n > 0 && (n & (n - 1)) == 0);
+    for (int h = 1; h < n; h *= 2) {
+        for (int i = 0; i < n; i += h * 2) {
+            for (int j = i; j < i + h; ++j) {
+                const float a = x[j];
+                const float b = x[j + h];
+                x[j]     = a + b;
+                x[j + h] = a - b;
+            }
+        }
+    }
+}
+
+// Gaussian Lloyd-Max optimal centroids for 8 / 4 levels (symmetric), scaled
+// by 1 / sqrt(QK_TURBO). The encoder normalises each block to unit L2 norm
+// before threshold lookup, so the limiting marginal distribution at large
+// d is approximately N(0, 1/d) and these levels are MSE-optimal.
+// Source: Max 1960 / Paez & Glisson 1972 tables.
+// Regenerate via tools/turboquant/gen_codebook.py to refine on the true
+// Beta(0.5, (d-1)/2) distribution (within ~0.5 % MSE of these values for d = 128).
+#define TURBOQ_INV_SQRT_QK 0.08838834764831845f  // 1/sqrt(128)
+static const float TURBO3_CODEBOOK[8] = {
+    -2.1519f * TURBOQ_INV_SQRT_QK,
+    -1.3439f * TURBOQ_INV_SQRT_QK,
+    -0.7560f * TURBOQ_INV_SQRT_QK,
+    -0.2451f * TURBOQ_INV_SQRT_QK,
+    +0.2451f * TURBOQ_INV_SQRT_QK,
+    +0.7560f * TURBOQ_INV_SQRT_QK,
+    +1.3439f * TURBOQ_INV_SQRT_QK,
+    +2.1519f * TURBOQ_INV_SQRT_QK,
+};
+static const float TURBO2_CODEBOOK[4] = {
+    -1.5104f * TURBOQ_INV_SQRT_QK,
+    -0.4528f * TURBOQ_INV_SQRT_QK,
+    +0.4528f * TURBOQ_INV_SQRT_QK,
+    +1.5104f * TURBOQ_INV_SQRT_QK,
+};
+
+// Decision thresholds (midpoint between adjacent levels) for branchless
+// nearest-centroid lookup at encode time.
+static const float TURBO3_THRESHOLDS[7] = {
+    (-2.1519f + -1.3439f) * 0.5f * TURBOQ_INV_SQRT_QK,
+    (-1.3439f + -0.7560f) * 0.5f * TURBOQ_INV_SQRT_QK,
+    (-0.7560f + -0.2451f) * 0.5f * TURBOQ_INV_SQRT_QK,
+    (-0.2451f + +0.2451f) * 0.5f * TURBOQ_INV_SQRT_QK,
+    (+0.2451f + +0.7560f) * 0.5f * TURBOQ_INV_SQRT_QK,
+    (+0.7560f + +1.3439f) * 0.5f * TURBOQ_INV_SQRT_QK,
+    (+1.3439f + +2.1519f) * 0.5f * TURBOQ_INV_SQRT_QK,
+};
+static const float TURBO2_THRESHOLDS[3] = {
+    (-1.5104f + -0.4528f) * 0.5f * TURBOQ_INV_SQRT_QK,
+    (-0.4528f + +0.4528f) * 0.5f * TURBOQ_INV_SQRT_QK,
+    (+0.4528f + +1.5104f) * 0.5f * TURBOQ_INV_SQRT_QK,
+};
+
+static inline int turboq_pick_3bit(float v) {
+    int idx = 0;
+    for (int i = 0; i < 7; ++i) {
+        idx += (v >= TURBO3_THRESHOLDS[i]) ? 1 : 0;
+    }
+    return idx;
+}
+
+static inline int turboq_pick_2bit(float v) {
+    int idx = 0;
+    for (int i = 0; i < 3; ++i) {
+        idx += (v >= TURBO2_THRESHOLDS[i]) ? 1 : 0;
+    }
+    return idx;
+}
+
+// 128 × 3-bit indices packed into 48 bytes, 8 indices per 3-byte chunk.
+static inline void turboq_pack_3bit(const uint8_t * GGML_RESTRICT src_idx,
+                                    uint8_t       * GGML_RESTRICT dst) {
+    for (int b = 0; b < QK_TURBO / 8; ++b) {
+        const uint32_t i0 = src_idx[b*8 + 0] & 7u;
+        const uint32_t i1 = src_idx[b*8 + 1] & 7u;
+        const uint32_t i2 = src_idx[b*8 + 2] & 7u;
+        const uint32_t i3 = src_idx[b*8 + 3] & 7u;
+        const uint32_t i4 = src_idx[b*8 + 4] & 7u;
+        const uint32_t i5 = src_idx[b*8 + 5] & 7u;
+        const uint32_t i6 = src_idx[b*8 + 6] & 7u;
+        const uint32_t i7 = src_idx[b*8 + 7] & 7u;
+        const uint32_t lo = i0 | (i1 << 3) | (i2 << 6) | (i3 << 9) |
+                            (i4 << 12) | (i5 << 15) | (i6 << 18) | (i7 << 21);
+        dst[b*3 + 0] = (uint8_t)(lo        & 0xFFu);
+        dst[b*3 + 1] = (uint8_t)((lo >> 8) & 0xFFu);
+        dst[b*3 + 2] = (uint8_t)((lo >> 16) & 0xFFu);
+    }
+}
+
+static inline void turboq_unpack_3bit(const uint8_t * GGML_RESTRICT src,
+                                      uint8_t       * GGML_RESTRICT dst_idx) {
+    for (int b = 0; b < QK_TURBO / 8; ++b) {
+        const uint32_t lo = (uint32_t) src[b*3 + 0]
+                          | ((uint32_t) src[b*3 + 1] << 8)
+                          | ((uint32_t) src[b*3 + 2] << 16);
+        dst_idx[b*8 + 0] = (uint8_t)((lo      ) & 7u);
+        dst_idx[b*8 + 1] = (uint8_t)((lo >> 3 ) & 7u);
+        dst_idx[b*8 + 2] = (uint8_t)((lo >> 6 ) & 7u);
+        dst_idx[b*8 + 3] = (uint8_t)((lo >> 9 ) & 7u);
+        dst_idx[b*8 + 4] = (uint8_t)((lo >> 12) & 7u);
+        dst_idx[b*8 + 5] = (uint8_t)((lo >> 15) & 7u);
+        dst_idx[b*8 + 6] = (uint8_t)((lo >> 18) & 7u);
+        dst_idx[b*8 + 7] = (uint8_t)((lo >> 21) & 7u);
+    }
+}
+
+static inline void turboq_pack_2bit(const uint8_t * GGML_RESTRICT src_idx,
+                                    uint8_t       * GGML_RESTRICT dst) {
+    for (int i = 0; i < QK_TURBO / 4; ++i) {
+        dst[i] = (uint8_t)(
+            ((src_idx[i*4 + 0] & 3u)     ) |
+            ((src_idx[i*4 + 1] & 3u) << 2) |
+            ((src_idx[i*4 + 2] & 3u) << 4) |
+            ((src_idx[i*4 + 3] & 3u) << 6)
+        );
+    }
+}
+
+static inline void turboq_unpack_2bit(const uint8_t * GGML_RESTRICT src,
+                                      uint8_t       * GGML_RESTRICT dst_idx) {
+    for (int i = 0; i < QK_TURBO / 4; ++i) {
+        const uint8_t b = src[i];
+        dst_idx[i*4 + 0] = (uint8_t)((b     ) & 3u);
+        dst_idx[i*4 + 1] = (uint8_t)((b >> 2) & 3u);
+        dst_idx[i*4 + 2] = (uint8_t)((b >> 4) & 3u);
+        dst_idx[i*4 + 3] = (uint8_t)((b >> 6) & 3u);
+    }
+}
+
+void quantize_row_turbo3_ref(const float * GGML_RESTRICT x, block_turbo3 * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO == 0);
+    const int64_t nb = k / QK_TURBO;
+
+    float buf[QK_TURBO];
+    uint8_t idx[QK_TURBO];
+
+    for (int64_t i = 0; i < nb; ++i) {
+        for (int j = 0; j < QK_TURBO; ++j) buf[j] = x[i*QK_TURBO + j];
+        ggml_fwht_f32(buf, QK_TURBO);
+
+        float sumsq = 0.0f;
+        for (int j = 0; j < QK_TURBO; ++j) sumsq += buf[j] * buf[j];
+        const float norm = sqrtf(sumsq);
+        y[i].norm = GGML_CPU_FP32_TO_FP16(norm);
+
+        if (norm > 0.0f) {
+            const float inv = 1.0f / norm;
+            for (int j = 0; j < QK_TURBO; ++j) {
+                idx[j] = (uint8_t) turboq_pick_3bit(buf[j] * inv);
+            }
+        } else {
+            // Convention: empty (all-zero) block decodes to a centroid
+            // closest to zero. Both index 3 and 4 are symmetric; pick 3.
+            for (int j = 0; j < QK_TURBO; ++j) idx[j] = 3;
+        }
+        turboq_pack_3bit(idx, y[i].qs);
+    }
+}
+
+void quantize_row_turbo2_ref(const float * GGML_RESTRICT x, block_turbo2 * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO == 0);
+    const int64_t nb = k / QK_TURBO;
+
+    float buf[QK_TURBO];
+    uint8_t idx[QK_TURBO];
+
+    for (int64_t i = 0; i < nb; ++i) {
+        for (int j = 0; j < QK_TURBO; ++j) buf[j] = x[i*QK_TURBO + j];
+        ggml_fwht_f32(buf, QK_TURBO);
+
+        float sumsq = 0.0f;
+        for (int j = 0; j < QK_TURBO; ++j) sumsq += buf[j] * buf[j];
+        const float norm = sqrtf(sumsq);
+        y[i].norm = GGML_CPU_FP32_TO_FP16(norm);
+
+        if (norm > 0.0f) {
+            const float inv = 1.0f / norm;
+            for (int j = 0; j < QK_TURBO; ++j) {
+                idx[j] = (uint8_t) turboq_pick_2bit(buf[j] * inv);
+            }
+        } else {
+            for (int j = 0; j < QK_TURBO; ++j) idx[j] = 1;
+        }
+        turboq_pack_2bit(idx, y[i].qs);
+    }
+}
+
+void dequantize_row_turbo3(const block_turbo3 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO == 0);
+    const int64_t nb = k / QK_TURBO;
+
+    float buf[QK_TURBO];
+    uint8_t idx[QK_TURBO];
+
+    // FWHT applied twice scales by QK_TURBO; the inverse rotation is the
+    // forward FWHT followed by a 1/QK_TURBO division.
+    const float inv_qk = 1.0f / (float) QK_TURBO;
+
+    for (int64_t i = 0; i < nb; ++i) {
+        const float norm = GGML_CPU_FP16_TO_FP32(x[i].norm);
+        turboq_unpack_3bit(x[i].qs, idx);
+        for (int j = 0; j < QK_TURBO; ++j) {
+            buf[j] = TURBO3_CODEBOOK[idx[j]] * norm;
+        }
+        ggml_fwht_f32(buf, QK_TURBO);
+        for (int j = 0; j < QK_TURBO; ++j) {
+            y[i*QK_TURBO + j] = buf[j] * inv_qk;
+        }
+    }
+}
+
+void dequantize_row_turbo2(const block_turbo2 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO == 0);
+    const int64_t nb = k / QK_TURBO;
+
+    float buf[QK_TURBO];
+    uint8_t idx[QK_TURBO];
+
+    const float inv_qk = 1.0f / (float) QK_TURBO;
+
+    for (int64_t i = 0; i < nb; ++i) {
+        const float norm = GGML_CPU_FP16_TO_FP32(x[i].norm);
+        turboq_unpack_2bit(x[i].qs, idx);
+        for (int j = 0; j < QK_TURBO; ++j) {
+            buf[j] = TURBO2_CODEBOOK[idx[j]] * norm;
+        }
+        ggml_fwht_f32(buf, QK_TURBO);
+        for (int j = 0; j < QK_TURBO; ++j) {
+            y[i*QK_TURBO + j] = buf[j] * inv_qk;
+        }
+    }
 }
