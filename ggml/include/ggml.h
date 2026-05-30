@@ -429,7 +429,13 @@ extern "C" {
         GGML_TYPE_MXFP4   = 39, // MXFP4 (1 block)
         GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
         GGML_TYPE_Q1_0    = 41,
-        GGML_TYPE_COUNT   = 42,
+        // TurboQuant KV-cache vector quantization (Zandieh et al., ICLR 2026, arXiv 2504.19874).
+        // 128-coord blocks (= head_dim). FWHT-rotated, normalised to unit length, per-coordinate
+        // scalar quantised against a precomputed Lloyd-Max codebook. Norm is stored as FP16 inside
+        // the block; decode = codebook lookup × norm × Hᵀ. KV-cache only.
+        GGML_TYPE_TURBO3  = 42, // 3 bits / coord — quality-neutral for long-context KV
+        GGML_TYPE_TURBO2  = 43, // 2 bits / coord — experimental, opt-in only
+        GGML_TYPE_COUNT   = 44,
     };
 
     // precision

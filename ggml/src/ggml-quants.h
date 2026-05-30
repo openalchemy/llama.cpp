@@ -41,6 +41,9 @@ GGML_API void quantize_row_iq4_xs_ref (const float * GGML_RESTRICT x, block_iq4_
 GGML_API void quantize_row_iq3_s_ref  (const float * GGML_RESTRICT x, block_iq3_s   * GGML_RESTRICT y, int64_t k);
 GGML_API void quantize_row_iq2_s_ref  (const float * GGML_RESTRICT x, block_iq2_s   * GGML_RESTRICT y, int64_t k);
 
+GGML_API void quantize_row_turbo3_ref (const float * GGML_RESTRICT x, block_turbo3  * GGML_RESTRICT y, int64_t k);
+GGML_API void quantize_row_turbo2_ref (const float * GGML_RESTRICT x, block_turbo2  * GGML_RESTRICT y, int64_t k);
+
 // Dequantization
 GGML_API void dequantize_row_q1_0(const block_q1_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 GGML_API void dequantize_row_q4_0(const block_q4_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
@@ -72,6 +75,15 @@ GGML_API void dequantize_row_iq1_m  (const block_iq1_m   * GGML_RESTRICT x, floa
 GGML_API void dequantize_row_iq4_nl (const block_iq4_nl  * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 GGML_API void dequantize_row_iq4_xs (const block_iq4_xs  * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 GGML_API void dequantize_row_iq3_s  (const block_iq3_s   * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+
+GGML_API void dequantize_row_turbo3 (const block_turbo3  * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+GGML_API void dequantize_row_turbo2 (const block_turbo2  * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+
+// Host-side Fast Walsh-Hadamard Transform. In-place, length must be a power of two.
+// Used by both the CPU reference path and the test harness. The CUDA path has its
+// own kernel in ggml/src/ggml-cuda/fwht.cu and does not call this.
+// Self-inverse up to a factor of n: applying twice scales by n.
+GGML_API void ggml_fwht_f32(float * GGML_RESTRICT x, int n);
 
 // Quantization utilizing an importance matrix (a.k.a. "Activation aWare Quantization")
 GGML_API size_t quantize_iq2_xxs(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
