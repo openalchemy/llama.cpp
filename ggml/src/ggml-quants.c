@@ -5851,6 +5851,26 @@ void dequantize_row_turbo3(const block_turbo3 * GGML_RESTRICT x, float * GGML_RE
     }
 }
 
+size_t quantize_turbo3(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix) {
+    (void) imatrix; // data-oblivious — TurboQuant uses no calibration matrix
+    const int64_t row_bytes = sizeof(block_turbo3) * (n_per_row / QK_TURBO);
+    char * out = (char *) dst;
+    for (int64_t r = 0; r < nrows; ++r) {
+        quantize_row_turbo3_ref(src + r * n_per_row, (block_turbo3 *)(out + r * row_bytes), n_per_row);
+    }
+    return (size_t)(nrows * row_bytes);
+}
+
+size_t quantize_turbo2(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix) {
+    (void) imatrix;
+    const int64_t row_bytes = sizeof(block_turbo2) * (n_per_row / QK_TURBO);
+    char * out = (char *) dst;
+    for (int64_t r = 0; r < nrows; ++r) {
+        quantize_row_turbo2_ref(src + r * n_per_row, (block_turbo2 *)(out + r * row_bytes), n_per_row);
+    }
+    return (size_t)(nrows * row_bytes);
+}
+
 void dequantize_row_turbo2(const block_turbo2 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
     assert(k % QK_TURBO == 0);
     const int64_t nb = k / QK_TURBO;

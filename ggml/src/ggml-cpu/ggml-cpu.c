@@ -227,6 +227,22 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
         .vec_dot_type             = GGML_TYPE_Q8_0,
         .nrows                    = 1,
     },
+    [GGML_TYPE_TURBO3] = {
+        // KV-cache only — never matmul'd, so no vec_dot. CPU cpy path
+        // (ops.cpp ggml_compute_forward_dup_f32) uses from_float to
+        // route f32 → block_turbo3 encoding. Wrapper lives in
+        // ggml-cpu/quants.c and forwards to quantize_row_turbo3_ref.
+        .from_float               = quantize_row_turbo3,
+        .vec_dot                  = NULL,
+        .vec_dot_type             = GGML_TYPE_COUNT,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_TURBO2] = {
+        .from_float               = quantize_row_turbo2,
+        .vec_dot                  = NULL,
+        .vec_dot_type             = GGML_TYPE_COUNT,
+        .nrows                    = 1,
+    },
     [GGML_TYPE_Q4_0] = {
         .from_float               = quantize_row_q4_0,
         .vec_dot                  = ggml_vec_dot_q4_0_q8_0,
