@@ -1981,12 +1981,23 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             v = ggml_transpose(ctx0, v);
         }
 
-        // this can happen when KV cache is not used (e.g. an embedding model with non-causal attn)
-        if (k->type == GGML_TYPE_F32) {
+        // this can happen when KV cache is not used (e.g. an embedding model with non-causal attn).
+        // Also Phase 3 Path A of spec doc/specs/2026-05-30-turboquant-kv-cache.md:
+        // when the KV cache is TurboQuant (TURBO3 / TURBO2), pre-dequant to F16
+        // immediately before flash_attn_ext. The cast routes through
+        // ggml-cuda/cpy.cu which dispatches to ggml_cpy_turbo3_f16_cuda /
+        // ggml_cpy_turbo2_f16_cuda; the CPU backend uses the to_float entry in
+        // the type_traits table. Keeps storage compressed in the cache slot
+        // while letting attention consume F16 on the existing fast path.
+        if (k->type == GGML_TYPE_F32   ||
+            k->type == GGML_TYPE_TURBO3 ||
+            k->type == GGML_TYPE_TURBO2) {
             k = ggml_cast(ctx0, k, GGML_TYPE_F16);
         }
 
-        if (v->type == GGML_TYPE_F32) {
+        if (v->type == GGML_TYPE_F32   ||
+            v->type == GGML_TYPE_TURBO3 ||
+            v->type == GGML_TYPE_TURBO2) {
             v = ggml_cast(ctx0, v, GGML_TYPE_F16);
         }
 

@@ -5252,6 +5252,17 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 if (src0_type == GGML_TYPE_F32 && src1_type == GGML_TYPE_IQ4_NL) {
                     return true;
                 }
+                // TurboQuant — KV-cache encode + decode pairs. The CUDA
+                // kernels in ggml-cuda/turboquant.cu currently expect
+                // contiguous tensors (one block per leading-dim chunk);
+                // non-contiguous variants fall through to "not supported"
+                // which the graph builder treats as a fallback signal.
+                if (src0_type == GGML_TYPE_F32   && src1_type == GGML_TYPE_TURBO3) return true;
+                if (src0_type == GGML_TYPE_TURBO3 && src1_type == GGML_TYPE_F32)   return true;
+                if (src0_type == GGML_TYPE_TURBO3 && src1_type == GGML_TYPE_F16)   return true;
+                if (src0_type == GGML_TYPE_F32   && src1_type == GGML_TYPE_TURBO2) return true;
+                if (src0_type == GGML_TYPE_TURBO2 && src1_type == GGML_TYPE_F32)   return true;
+                if (src0_type == GGML_TYPE_TURBO2 && src1_type == GGML_TYPE_F16)   return true;
                 if (src0_type == GGML_TYPE_F32 && src1_type == GGML_TYPE_I32) {
                     return true;
                 }

@@ -26,6 +26,14 @@ void quantize_row_q1_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, in
     quantize_row_q1_0_ref(x, y, k);
 }
 
+void quantize_row_turbo3(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    quantize_row_turbo3_ref(x, y, k);
+}
+
+void quantize_row_turbo2(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    quantize_row_turbo2_ref(x, y, k);
+}
+
 void quantize_row_q4_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
     quantize_row_q4_0_ref(x, y, k);
 }
