@@ -96,28 +96,36 @@ llama_kv_cache::llama_kv_cache(
 
     GGML_ASSERT(kv_size % n_pad == 0);
 
-    // TurboQuant requires head_dim == 128 (the FWHT block size, QK_TURBO).
-    // Hard-fail at cache construction rather than at first attention call
-    // so the agent sees a clear error from llama_new_context_with_model
-    // instead of an opaque CUDA assert mid-token. See spec
-    // doc/specs/2026-05-30-turboquant-kv-cache.md §3.3 for the rationale.
+    // TurboQuant requires head_dim to be a positive multiple of QK_TURBO
+    // (= 128, the FWHT block size). 128 covers Llama 3 / Qwen 2.5 / Mistral
+    // 7B / mach-fund; 256 covers Qwen 3.5 and Gemma. The KV row is then
+    // stored as head_dim/QK_TURBO consecutive turbo blocks per head — the
+    // ggml type machinery handles this naturally because blck_size is 128
+    // and ggml_row_size multiplies type_size by (n_per_row / blck_size).
+    // The cpy.cu kernels run one CUDA thread block per 128-block so a
+    // 256-dim head dispatches two thread blocks per row with no kernel
+    // change. Hard-fail here at cache construction rather than at the first
+    // attention call so the agent surfaces a clear error from
+    // llama_new_context_with_model instead of an opaque CUDA assert. See
+    // spec doc/specs/2026-05-30-turboquant-kv-cache.md §3.3.
     const bool type_k_is_turbo = (type_k == GGML_TYPE_TURBO3 || type_k == GGML_TYPE_TURBO2);
     const bool type_v_is_turbo = (type_v == GGML_TYPE_TURBO3 || type_v == GGML_TYPE_TURBO2);
     if (type_k_is_turbo || type_v_is_turbo) {
-        // Walk all KV-bearing layers; reject if any has a non-128 head_dim.
         const uint32_t n_layer_kv_check = hparams.n_layer_kv();
         for (uint32_t il = 0; il < n_layer_kv_check; ++il) {
             const int32_t hd_k = (int32_t) hparams.n_embd_head_k(il);
             const int32_t hd_v = (int32_t) hparams.n_embd_head_v(il);
-            if (type_k_is_turbo && hd_k != 128) {
+            if (type_k_is_turbo && (hd_k <= 0 || hd_k % 128 != 0)) {
                 throw std::runtime_error(
-                    "TurboQuant cache_type_k requires n_embd_head_k == 128; got "
-                    + std::to_string(hd_k) + " on layer " + std::to_string(il));
+                    "TurboQuant cache_type_k requires n_embd_head_k to be a positive "
+                    "multiple of 128; got " + std::to_string(hd_k)
+                    + " on layer " + std::to_string(il));
             }
-            if (type_v_is_turbo && hd_v != 128) {
+            if (type_v_is_turbo && (hd_v <= 0 || hd_v % 128 != 0)) {
                 throw std::runtime_error(
-                    "TurboQuant cache_type_v requires n_embd_head_v == 128; got "
-                    + std::to_string(hd_v) + " on layer " + std::to_string(il));
+                    "TurboQuant cache_type_v requires n_embd_head_v to be a positive "
+                    "multiple of 128; got " + std::to_string(hd_v)
+                    + " on layer " + std::to_string(il));
             }
         }
     }
