@@ -46,6 +46,32 @@ void ggml_cpy_turbo2_f32_cuda(
     const int64_t nb10, const int64_t nb11, const int64_t nb12, const int64_t nb13,
     cudaStream_t stream);
 
+// =============================================================================
+// Phase 3 Path A — F16-emitting decoders so the graph can pre-dequant turbo
+// KV into an F16 scratch before Flash Attention. Encode side stays F32→turbo
+// because attention's K/V projection produces F32 in our current build.
+// =============================================================================
+
+// block_turbo3 → F16. Same shape as turbo3_f32 but writes half output —
+// the destination tensor is allocated in llama-graph.cpp as a pre-attention
+// scratch of dtype F16, sized to the KV slice the attention call needs.
+void ggml_cpy_turbo3_f16_cuda(
+    const char * cx, char * cdst, const int64_t ne,
+    const int64_t ne00, const int64_t ne01, const int64_t ne02,
+    const int64_t nb00, const int64_t nb01, const int64_t nb02, const int64_t nb03,
+    const int64_t ne10, const int64_t ne11, const int64_t ne12,
+    const int64_t nb10, const int64_t nb11, const int64_t nb12, const int64_t nb13,
+    cudaStream_t stream);
+
+// block_turbo2 → F16.
+void ggml_cpy_turbo2_f16_cuda(
+    const char * cx, char * cdst, const int64_t ne,
+    const int64_t ne00, const int64_t ne01, const int64_t ne02,
+    const int64_t nb00, const int64_t nb01, const int64_t nb02, const int64_t nb03,
+    const int64_t ne10, const int64_t ne11, const int64_t ne12,
+    const int64_t nb10, const int64_t nb11, const int64_t nb12, const int64_t nb13,
+    cudaStream_t stream);
+
 // FWHT a single 128-element vector held in shared memory by a 128-thread block.
 // Declared here so fattn-tile.cu (Phase 3) can include this header and reuse
 // the same shared-memory butterfly without pulling in the rest of the file.
