@@ -230,6 +230,71 @@ static __global__ void cpy_f32_turbo_kernel(
 // Decode: block_turbo3 / block_turbo2 → F32
 // =============================================================================
 
+// =============================================================================
+// F16-emitting decoder (Phase 3 Path A)
+//
+// Same algorithm as cpy_turbo_f32_kernel — unpack idx, codebook × norm,
+// FWHT, 1/n — but writes __half. Used by graph nodes that pre-dequant
+// turbo KV into an F16 scratch immediately before Flash Attention.
+// =============================================================================
+
+template <bool IS_3BIT>
+static __global__ void cpy_turbo_f16_kernel(
+    const char * __restrict__ cx, char * __restrict__ cdst,
+    const int64_t ne,
+    const int64_t ne00, const int64_t ne01, const int64_t ne02,
+    const int64_t nb00, const int64_t nb01, const int64_t nb02, const int64_t nb03,
+    const int64_t ne10, const int64_t ne11, const int64_t ne12,
+    const int64_t nb10, const int64_t nb11, const int64_t nb12, const int64_t nb13)
+{
+    const int64_t i_block = blockIdx.x;
+    const int64_t block_start = i_block * QK_TURBO;
+    if (block_start >= ne) return;
+
+    const int64_t i03 = i_block / ((ne00/QK_TURBO) * ne01 * ne02);
+    const int64_t i02 = (i_block - i03*(ne00/QK_TURBO)*ne01*ne02) / ((ne00/QK_TURBO)*ne01);
+    const int64_t i01 = (i_block - i03*(ne00/QK_TURBO)*ne01*ne02 - i02*(ne00/QK_TURBO)*ne01) / (ne00/QK_TURBO);
+    const int64_t i00 =  i_block - i03*(ne00/QK_TURBO)*ne01*ne02 - i02*(ne00/QK_TURBO)*ne01 - i01*(ne00/QK_TURBO);
+    const int64_t x_offset = i00*nb00 + i01*nb01 + i02*nb02 + i03*nb03;
+
+    const int64_t i13 = block_start / (ne10 * ne11 * ne12);
+    const int64_t i12 = (block_start - i13*ne10*ne11*ne12) / (ne10*ne11);
+    const int64_t i11 = (block_start - i13*ne10*ne11*ne12 - i12*ne10*ne11) / ne10;
+    const int64_t i10 =  block_start - i13*ne10*ne11*ne12 - i12*ne10*ne11 - i11*ne10;
+    const int64_t dst_offset = i10*nb10 + i11*nb11 + i12*nb12 + i13*nb13;
+
+    const int lane = threadIdx.x;
+    __shared__ float s_buf[QK_TURBO];
+
+    int idx;
+    float norm;
+    if (IS_3BIT) {
+        const block_turbo3 * src = (const block_turbo3 *)(cx + x_offset);
+        norm = __half2float(src->norm);
+        const int chunk = lane >> 3;
+        const int off   = lane & 7;
+        const uint32_t lo = (uint32_t) src->qs[chunk*3 + 0]
+                          | ((uint32_t) src->qs[chunk*3 + 1] << 8)
+                          | ((uint32_t) src->qs[chunk*3 + 2] << 16);
+        idx = (int)((lo >> (off * 3)) & 7u);
+        s_buf[lane] = turboq_decode_3bit_dev(idx) * norm;
+    } else {
+        const block_turbo2 * src = (const block_turbo2 *)(cx + x_offset);
+        norm = __half2float(src->norm);
+        const int byte = lane >> 2;
+        const int off  = lane & 3;
+        idx = (int)((src->qs[byte] >> (off * 2)) & 3u);
+        s_buf[lane] = turboq_decode_2bit_dev(idx) * norm;
+    }
+    __syncthreads();
+
+    turboq_fwht128_smem(s_buf);
+    const float scaled = s_buf[lane] / (float) QK_TURBO;
+
+    __half * dst = (__half *)(cdst + dst_offset);
+    dst[lane] = __float2half(scaled);
+}
+
 template <bool IS_3BIT>
 static __global__ void cpy_turbo_f32_kernel(
     const char * __restrict__ cx, char * __restrict__ cdst,
@@ -357,6 +422,38 @@ void ggml_cpy_turbo2_f32_cuda(
     const int64_t num_blocks = ne / QK_TURBO;
     GGML_ASSERT(num_blocks < UINT_MAX);
     cpy_turbo_f32_kernel<false><<<(unsigned)num_blocks, QK_TURBO, 0, stream>>>
+        (cx, cdst, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03,
+         ne10, ne11, ne12, nb10, nb11, nb12, nb13);
+}
+
+void ggml_cpy_turbo3_f16_cuda(
+    const char * cx, char * cdst, const int64_t ne,
+    const int64_t ne00, const int64_t ne01, const int64_t ne02,
+    const int64_t nb00, const int64_t nb01, const int64_t nb02, const int64_t nb03,
+    const int64_t ne10, const int64_t ne11, const int64_t ne12,
+    const int64_t nb10, const int64_t nb11, const int64_t nb12, const int64_t nb13,
+    cudaStream_t stream)
+{
+    GGML_ASSERT(ne % QK_TURBO == 0);
+    const int64_t num_blocks = ne / QK_TURBO;
+    GGML_ASSERT(num_blocks < UINT_MAX);
+    cpy_turbo_f16_kernel<true><<<(unsigned)num_blocks, QK_TURBO, 0, stream>>>
+        (cx, cdst, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03,
+         ne10, ne11, ne12, nb10, nb11, nb12, nb13);
+}
+
+void ggml_cpy_turbo2_f16_cuda(
+    const char * cx, char * cdst, const int64_t ne,
+    const int64_t ne00, const int64_t ne01, const int64_t ne02,
+    const int64_t nb00, const int64_t nb01, const int64_t nb02, const int64_t nb03,
+    const int64_t ne10, const int64_t ne11, const int64_t ne12,
+    const int64_t nb10, const int64_t nb11, const int64_t nb12, const int64_t nb13,
+    cudaStream_t stream)
+{
+    GGML_ASSERT(ne % QK_TURBO == 0);
+    const int64_t num_blocks = ne / QK_TURBO;
+    GGML_ASSERT(num_blocks < UINT_MAX);
+    cpy_turbo_f16_kernel<false><<<(unsigned)num_blocks, QK_TURBO, 0, stream>>>
         (cx, cdst, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03,
          ne10, ne11, ne12, nb10, nb11, nb12, nb13);
 }
