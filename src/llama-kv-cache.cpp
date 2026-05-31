@@ -107,8 +107,8 @@ llama_kv_cache::llama_kv_cache(
         // Walk all KV-bearing layers; reject if any has a non-128 head_dim.
         const uint32_t n_layer_kv_check = hparams.n_layer_kv();
         for (uint32_t il = 0; il < n_layer_kv_check; ++il) {
-            const int32_t hd_k = (int32_t) hparams.n_embd_head_k;
-            const int32_t hd_v = (int32_t) hparams.n_embd_head_v;
+            const int32_t hd_k = (int32_t) hparams.n_embd_head_k(il);
+            const int32_t hd_v = (int32_t) hparams.n_embd_head_v(il);
             if (type_k_is_turbo && hd_k != 128) {
                 throw std::runtime_error(
                     "TurboQuant cache_type_k requires n_embd_head_k == 128; got "

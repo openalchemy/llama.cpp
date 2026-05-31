@@ -5783,7 +5783,7 @@ void quantize_row_turbo3_ref(const float * GGML_RESTRICT x, block_turbo3 * GGML_
         float sumsq = 0.0f;
         for (int j = 0; j < QK_TURBO; ++j) sumsq += buf[j] * buf[j];
         const float norm = sqrtf(sumsq);
-        y[i].norm = GGML_CPU_FP32_TO_FP16(norm);
+        y[i].norm = GGML_FP32_TO_FP16(norm);
 
         if (norm > 0.0f) {
             const float inv = 1.0f / norm;
@@ -5813,7 +5813,7 @@ void quantize_row_turbo2_ref(const float * GGML_RESTRICT x, block_turbo2 * GGML_
         float sumsq = 0.0f;
         for (int j = 0; j < QK_TURBO; ++j) sumsq += buf[j] * buf[j];
         const float norm = sqrtf(sumsq);
-        y[i].norm = GGML_CPU_FP32_TO_FP16(norm);
+        y[i].norm = GGML_FP32_TO_FP16(norm);
 
         if (norm > 0.0f) {
             const float inv = 1.0f / norm;
@@ -5839,7 +5839,7 @@ void dequantize_row_turbo3(const block_turbo3 * GGML_RESTRICT x, float * GGML_RE
     const float inv_qk = 1.0f / (float) QK_TURBO;
 
     for (int64_t i = 0; i < nb; ++i) {
-        const float norm = GGML_CPU_FP16_TO_FP32(x[i].norm);
+        const float norm = GGML_FP16_TO_FP32(x[i].norm);
         turboq_unpack_3bit(x[i].qs, idx);
         for (int j = 0; j < QK_TURBO; ++j) {
             buf[j] = TURBO3_CODEBOOK[idx[j]] * norm;
@@ -5861,7 +5861,7 @@ void dequantize_row_turbo2(const block_turbo2 * GGML_RESTRICT x, float * GGML_RE
     const float inv_qk = 1.0f / (float) QK_TURBO;
 
     for (int64_t i = 0; i < nb; ++i) {
-        const float norm = GGML_CPU_FP16_TO_FP32(x[i].norm);
+        const float norm = GGML_FP16_TO_FP32(x[i].norm);
         turboq_unpack_2bit(x[i].qs, idx);
         for (int j = 0; j < QK_TURBO; ++j) {
             buf[j] = TURBO2_CODEBOOK[idx[j]] * norm;
