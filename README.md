@@ -1,4 +1,16 @@
-# llama.cpp
+# llama.cpp — OpenAlchemy fork (TurboQuant)
+
+> 🧪 **This is the [OpenAlchemy](https://openalchemy.io) fork of llama.cpp.**
+> The default `main` branch carries our **TurboQuant KV-cache compression**
+> patches on top of upstream [`ggml-org/llama.cpp`](https://github.com/ggml-org/llama.cpp).
+> See [`TURBOQUANT.md`](TURBOQUANT.md) for the feature overview, the
+> [docs/turboquant.md](docs/turboquant.md) spec for the algorithm + integration design,
+> and the [Engine Desktop runtime packs](https://updates.openalchemy.io/engine-desktop/runtimes/llamacpp-cuda12-windows-x86_64/)
+> for prebuilt Windows / CUDA binaries.
+>
+> Upstream is tracked at the `origin` remote — `git fetch origin master` to pull, then
+> rebase `main` onto `origin/master` when you want to bring the latest llama.cpp changes in.
+> All non-TurboQuant changes should still go upstream first.
 
 ![llama](https://user-images.githubusercontent.com/1991296/230134379-7181e485-c521-4d23-a0d6-f7b3b61ba524.png)
 

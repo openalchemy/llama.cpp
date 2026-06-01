@@ -1,0 +1,73 @@
+name: turboquant CI
+
+# Runs on every push / PR to main. Guards the TurboQuant patch series against
+# silent regressions:
+#   1. CPU build + test-turboquant unit tests (CPU reference + round-trip MSE).
+#   2. CPU build + test-backend-ops CPY subset (verifies the cpy.cu dispatcher
+#      additions still work alongside upstream changes).
+#
+# GPU paths require a CUDA runner — out of scope here. We rely on the
+# CPU-side type_traits being byte-compatible with the CUDA kernels (the
+# round-trip test exercises both via ggml_get_type_traits) for a strong-but-
+# not-perfect signal that the CUDA side won't break either.
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'ggml/include/ggml.h'
+      - 'ggml/src/ggml-common.h'
+      - 'ggml/src/ggml-quants.*'
+      - 'ggml/src/ggml.c'
+      - 'ggml/src/ggml-cpu/**'
+      - 'ggml/src/ggml-cuda/turboquant.*'
+      - 'ggml/src/ggml-cuda/cpy*'
+      - 'ggml/src/ggml-cuda/set-rows*'
+      - 'src/llama-graph.cpp'
+      - 'src/llama-kv-cache.cpp'
+      - 'common/arg.cpp'
+      - 'tests/test-turboquant.cpp'
+      - 'tests/test-backend-ops.cpp'
+      - '.github/workflows/turboquant-ci.yml'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  cpu-tests:
+    name: CPU tests (turboquant + cpy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: false
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake
+
+      - name: Configure (CPU only)
+        run: |
+          cmake -S . -B build-cpu -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_CUDA=OFF \
+            -DGGML_VULKAN=OFF \
+            -DLLAMA_BUILD_TESTS=ON \
+            -DLLAMA_BUILD_TOOLS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_SERVER=OFF \
+            -DLLAMA_CURL=OFF
+
+      - name: Build test-turboquant + test-backend-ops
+        run: cmake --build build-cpu --target test-turboquant test-backend-ops -j
+
+      - name: Run test-turboquant
+        run: ./build-cpu/bin/test-turboquant
+
+      - name: Run test-backend-ops -o CPY
+        # The default invocation runs all op tests across all backends — way too
+        # slow for CI. -o CPY restricts to copy ops which is what the turbo
+        # additions affect.
+        run: ./build-cpu/bin/test-backend-ops -o CPY
