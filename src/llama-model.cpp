@@ -1221,8 +1221,22 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         split_sum += splits[i];
         splits[i] = split_sum;
     }
-    for (size_t i = 0; i < n_devices(); ++i) {
-        splits[i] /= split_sum;
+    if (split_sum > 0.0f) {
+        for (size_t i = 0; i < n_devices(); ++i) {
+            splits[i] /= split_sum;
+        }
+    } else {
+        // Every device reported 0 free memory (e.g. the GPU is already
+        // near-full from another loaded model, so ggml_backend_dev_memory
+        // rounds free down to 0). Normalising by split_sum here would be a
+        // 0/0 division producing NaN split points, after which the
+        // upper_bound() below returns end() and devices.at() throws
+        // "invalid vector subscript". Fall back to an even split so the
+        // points still rise monotonically to 1.0 and every layer maps to a
+        // valid device.
+        for (size_t i = 0; i < n_devices(); ++i) {
+            splits[i] = float(i + 1) / float(n_devices());
+        }
     }
 
     const int i_gpu_start = std::max(int(hparams.n_layer) + 1 - n_gpu_layers, 0);
